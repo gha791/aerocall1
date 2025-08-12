@@ -1,0 +1,137 @@
+diff --git a/node_modules/genkit/package.json b/node_modules/genkit/package.json
+index 357df8a..8ff8cc7 100644
+--- a/node_modules/genkit/package.json
++++ b/node_modules/genkit/package.json
+@@ -62,5 +62,6 @@
+     "eslint-plugin-prettier": "^5.1.3",
+     "gts": "^5.3.1",
+     "npm-run-all": "^4.1.5",
+-    "typescript": "5.5.4"
++    "typescript": "5.5.4",
++    "genkit-cli": "1.14.1"
+   }
+ }
+diff --git a/node_modules/genkit/src/index.ts b/node_modules/genkit/src/index.ts
+index b0a52b8..0ddc549 100644
+--- a/node_modules/genkit/src/index.ts
++++ b/node_modules/genkit/src/index.ts
+@@ -37,6 +37,7 @@ export { defineTool, ToolAction } from './tools.js';
+ export {
+   lookupAction,
+   listActions,
++  listActionsByPlugin,
+   Action,
+   action,
+ } from './action.js';
+diff --git a/node_modules/genkit/src/action.ts b/node_modules/genkit/src/action.ts
+index e992b21..651f8fd 100644
+--- a/node_modules/genkit/src/action.ts
++++ b/node_modules/genkit/src/action.ts
+@@ -20,6 +20,7 @@ import { GenkitError } from './error.js';
+ import { lookupPlugin } from './plugins.js';
+ import { isStreamable } from './streaming.js';
+ import { ValueType } from './telemetry.js';
++import { getPluginType } from './utils.js';
+ 
+ export const actionMetrics = {
+   requests: {
+@@ -99,6 +100,20 @@ export function listActions(): Record<string, Action<any, any> | undefined> {
+   return actionRegistry;
+ }
+ 
++export function listActionsByPlugin(
++  pluginId: string
++): Record<string, Action<any, any> | undefined> {
++  const result: Record<string, Action<any, any> | undefined> = {};
++  for (const name in actionRegistry) {
++    const plugin = getPluginType(actionRegistry[name]?.plugin);
++    if (plugin && plugin.name === pluginId) {
++      result[name] = actionRegistry[name];
++    }
++  }
++  console.log('listActionsByPlugin', pluginId, result);
++  return result;
++}
++
+ /**
+  * Looks up a previously-defined action by name.
+  * @param name Name of the action, as provided to `defineAction`.
+diff --git a/node_modules/genkit/src/plugins.ts b/node_modules/genkit/src/plugins.ts
+index 5882e75..b0d402f 100644
+--- a/node_modules/genkit/src/plugins.ts
++++ b/node_modules/genkit/src/plugins.ts
+@@ -19,6 +19,7 @@ import { GenkitError } from './error.js';
+ import { Telemetry } from './telemetry.js';
+ import { TraceStore } from './trace/store.js';
+ import { isPromise } from './utils.js';
++import { listActionsByPlugin } from './action.js';
+ 
+ const pluginRegistry: Record<string, GenkitPlugin> = {};
+ 
+@@ -31,6 +32,13 @@ export interface GenkitPlugin {
+   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   [key: string]: any;
+   name: string;
++  // Called when the plugin is initialized.
++  // eslint-disable-next-line @typescript-eslint/no-explicit-any
++  onInit?: (options: any) => Promise<void>;
++  // Called before any actions are executed.
++  onRun?: (
++    trace: any
++  ) => Promise<{ [key: string]: string | undefined } | undefined>;
+ }
+ 
+ export async function loadPlugin<T extends GenkitPlugin>(
+@@ -51,6 +59,10 @@ export async function loadPlugins(
+   plugins: Array<GenkitPlugin | Promise<GenkitPlugin>>
+ ): Promise<Record<string, GenkitPlugin>> {
+   for (const p of plugins) {
++    if (isPromise(p)) {
++      await p;
++      continue;
++    }
+     if (!pluginRegistry[p.name]) {
+       pluginRegistry[p.name] = p;
+     }
+@@ -75,6 +87,17 @@ export async function initPlugins(
+   const telemetry: Telemetry = { traceStore: undefined };
+   for (const key in pluginRegistry) {
+     const plugin = pluginRegistry[key];
++    if (plugin.onInit) {
++      const actions = listActionsByPlugin(plugin.name);
++      for (const actionName in actions) {
++        const action = actions[actionName];
++        if (!action) {
++          continue;
++        }
++        // TODO: Figure out what to pass here.
++        plugin.onInit(undefined);
++      }
++    }
+     if (plugin.traceStore) {
+       if (telemetry.traceStore) {
+         throw new GenkitError({
+diff --git a/node_modules/genkit/src/utils.ts b/node_modules/genkit/src/utils.ts
+index a1598ce..b712c9b 100644
+--- a/node_modules/genkit/src/utils.ts
++++ b/node_modules/genkit/src/utils.ts
+@@ -14,6 +14,7 @@
+  * limitations under the License.
+  */
+ 
++import { GenkitPlugin } from './plugins';
+ import { isStreamable, streamableData } from './streaming';
+ 
+ /**
+@@ -58,3 +59,11 @@ export function getReadableStream<T>(
+   });
+   return [s1, s2];
+ }
++
++export function getPluginType(plugin: GenkitPlugin | string): GenkitPlugin {
++  if (typeof plugin === 'string') {
++    // @ts-ignore
++    return registry[plugin];
++  }
++  return plugin;
++}

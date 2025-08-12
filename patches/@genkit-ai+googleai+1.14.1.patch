@@ -1,0 +1,303 @@
+diff --git a/node_modules/@genkit-ai/googleai/genkit.config.js b/node_modules/@genkit-ai/googleai/genkit.config.js
+index 9a20281..7b3f940 100644
+--- a/node_modules/@genkit-ai/googleai/genkit.config.js
++++ b/node_modules/@genkit-ai/googleai/genkit.config.js
+@@ -19,5 +19,6 @@ export default {
+     'gemini-2.0-flash-preview-image-generation',
+     'gemini-2.5-flash-preview-tts',
+     'veo-2.0-generate-001',
++    'veo-3.0-generate-preview',
+   ],
+ };
+diff --git a/node_modules/@genkit-ai/googleai/package.json b/node_modules/@genkit-ai/googleai/package.json
+index 3224b1a..2b7e193 100644
+--- a/node_modules/@genkit-ai/googleai/package.json
++++ b/node_modules/@genkit-ai/googleai/package.json
+@@ -52,6 +52,7 @@
+     "eslint-plugin-prettier": "^5.1.3",
+     "gts": "^5.3.1",
+     "npm-run-all": "^4.1.5",
+-    "typescript": "5.5.4"
++    "typescript": "5.5.4",
++    "genkit-cli": "1.14.1"
+   }
+ }
+diff --git a/node_modules/@genkit-ai/googleai/src/index.ts b/node_modules/@genkit-ai/googleai/src/index.ts
+index b34d0b0..5b6d92e 100644
+--- a/node_modules/@genkit-ai/googleai/src/index.ts
++++ b/node_modules/@genkit-ai/googleai/src/index.ts
+@@ -87,6 +87,7 @@ const GEMINI_2_SUPPORTED_MODELS = {
+   'gemini-2.0-flash-preview-image-generation': gemini2,
+   'gemini-2.5-flash-preview-tts': gemini2,
+   'veo-2.0-generate-001': gemini2,
++  'veo-3.0-generate-preview': gemini2,
+ };
+ 
+ const ALL_SUPPORTED_MODELS = {
+diff --git a/node_modules/@genkit-ai/googleai/src/gemini.ts b/node_modules/@genkit-ai/googleai/src/gemini.ts
+index b315d18..a99c7bf 100644
+--- a/node_modules/@genkit-ai/googleai/src/gemini.ts
++++ b/node_modules/@genkit-ai/googleai/src/gemini.ts
+@@ -29,6 +29,7 @@ import {
+   ToolChoice,
+   ToolConfiguration,
+ } from '@google-cloud/vertexai';
++import { track, UNINITIALIZED } from 'genkit';
+ 
+ const GOOGLE_AI_BASE_URL = 'https://generativelanguage.googleapis.com';
+ const CLIENT_INFO = {
+@@ -141,6 +142,9 @@ export function geminiPro(
+     name,
+     {
+       generate: async (request, streaming) => {
++        let client = UNINITIALIZED;
++        let modelId = UNINITIALIZED;
++        let responseModalities: any;
+         let aqaBypass: 'google-search';
+         if (request.config?.aqaBypass) {
+           aqaBypass = request.config.aqaBypass;
+@@ -148,15 +152,14 @@ export function geminiPro(
+         const modelName = toModelName(name);
+ 
+         const { GAuth, Gaxios } = await import('gaxios');
+-        const client = new Gaxios({
++        client = new Gaxios({
+           baseURL: GOOGLE_AI_BASE_URL,
+           headers: {
+             'User-Agent': CLIENT_INFO['user-agent'],
+           },
+         });
+         const gauth = new GAuth({
+-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+           scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+           ...options,
+         });
+@@ -165,11 +168,10 @@ export function geminiPro(
+         const headers = await gauth.getRequestHeaders();
+ 
+         const url = `/v1beta/models/${modelName}:${
+           streaming ? 'streamGenerateContent' : 'generateContent'
+-        }${aqaBypass ? '?aqaBypass=' + aqaBypass : ''}`;
+-
+-        const responseModalities = request.config?.responseModalities;
+-
++        }${aqaBypass ? `?aqaBypass=${aqaBypass}` : ''}`;
++
++        responseModalities = request.config?.responseModalities;
++        modelId = modelName;
+         const body: GenerateContentRequest = {
+           contents: toGoogleAIContent(request.messages, {
+             keepEmptyContent: true,
+@@ -207,6 +209,24 @@ export function geminiPro(
+           tools: toGoogleAITools(request.tools, request.config),
+           toolConfig: toGoogleAIToolConfig(request.config, request.tools),
+         };
++        if (
++          responseModalities?.includes('AUDIO') &&
++          request.config?.speechConfig
++        ) {
++          body.outputConfig = {
++            // @ts-ignore
++            responseMimeType: 'audio/mpeg',
++            // @ts-ignore
++            speechConfig: request.config?.speechConfig,
++          };
++        }
++        if (
++          responseModalities?.includes('VIDEO') &&
++          request.config?.videoConfig
++        ) {
++          // @ts-ignore
++          body.videoConfig = request.config.videoConfig;
++        }
+ 
+         const result = await client.request<GenerateContentResponse>({
+           url,
+@@ -218,6 +238,21 @@ export function geminiPro(
+           retry: true,
+         });
+ 
++        track({
++          path: `/googleai/${name}`,
++          type: 'model',
++          request,
++          response: result.data,
++          responseValue: (resp: any) =>
++            resp.candidates?.[0]?.content?.parts.map((p: any) => p.text) || [],
++          context: {
++            modelId,
++            client,
++            responseModalities,
++            aqaBypass,
++          },
++        });
++
+         return toGenkitResponse(result.data);
+       },
+     }
+@@ -250,6 +287,9 @@ export function gemini2(name: string, options: Gemini2Options): ModelAction {
+     name,
+     {
+       generate: async (request, streaming) => {
++        let client = UNINITIALIZED;
++        let modelId = UNINITIALIZED;
++        let responseModalities: any;
+         let aqaBypass: 'google-search';
+         if (request.config?.aqaBypass) {
+           aqaBypass = request.config.aqaBypass;
+@@ -263,7 +303,7 @@ export function gemini2(name: string, options: Gemini2Options): ModelAction {
+ 
+         const { GAuth, Gaxios } = await import('gaxios');
+ 
+-        const client = new Gaxios({
++        client = new Gaxios({
+           baseURL: GOOGLE_AI_BASE_URL,
+           headers: {
+             'User-Agent': CLIENT_INFO['user-agent'],
+@@ -282,10 +322,10 @@ export function gemini2(name: string, options: Gemini2Options): ModelAction {
+           streaming ? 'streamGenerateContent' : 'generateContent'
+         }${aqaBypass ? `?aqaBypass=${aqaBypass}` : ''}`;
+ 
+-        const responseModalities = request.config?.responseModalities;
+-
++        responseModalities = request.config?.responseModalities;
++        modelId = modelName;
+         const body: GenerateContentRequest = {
+-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+           contents: toGoogleAIContent(request.messages) as any,
+           safetySettings: toGoogleAISafetySettings(request.config),
+           generationConfig: toGoogleAIGenerationConfig(request.config),
+@@ -307,6 +347,24 @@ export function gemini2(name: string, options: Gemini2Options): ModelAction {
+           tools: toGoogleAITools(request.tools, request.config),
+           toolConfig: toGoogleAIToolConfig(request.config, request.tools),
+         };
++        if (
++          responseModalities?.includes('AUDIO') &&
++          request.config?.speechConfig
++        ) {
++          body.outputConfig = {
++            // @ts-ignore
++            responseMimeType: 'audio/mpeg',
++            // @ts-ignore
++            speechConfig: request.config?.speechConfig,
++          };
++        }
++        if (
++          responseModalities?.includes('VIDEO') &&
++          request.config?.videoConfig
++        ) {
++          // @ts-ignore
++          body.videoConfig = request.config.videoConfig;
++        }
+ 
+         const result = await client.request<GenerateContentResponse>({
+           url,
+@@ -318,6 +376,21 @@ export function gemini2(name: string, options: Gemini2Options): ModelAction {
+           retry: true,
+         });
+ 
++        track({
++          path: `/googleai/${name}`,
++          type: 'model',
++          request,
++          response: result.data,
++          responseValue: (resp: any) =>
++            resp.candidates?.[0]?.content?.parts.map((p: any) => p.text) || [],
++          context: {
++            modelId,
++            client,
++            responseModalities,
++            aqaBypass,
++          },
++        });
++
+         return toGenkitResponse(result.data);
+       },
+     }
+diff --git a/node_modules/@genkit-ai/googleai/src/vertex.ts b/node_modules/@genkit-ai/googleai/src/vertex.ts
+index c6b9e28..5e8e788 100644
+--- a/node_modules/@genkit-ai/googleai/src/vertex.ts
++++ b/node_modules/@genkit-ai/googleai/src/vertex.ts
+@@ -21,6 +21,7 @@ import {
+   ToolChoice,
+   ToolConfiguration,
+ } from '@google-cloud/vertexai';
++import { track, UNINITIALIZED } from 'genkit';
+ 
+ export function vertexAI(
+   name: string,
+@@ -32,6 +33,9 @@ export function vertexAI(
+     name,
+     {
+       generate: async (request) => {
++        let client = UNINITIALIZED;
++        let modelId = UNINITIALIZED;
++        let responseModalities: any;
+         const {
+           project,
+           location,
+@@ -52,14 +56,15 @@ export function vertexAI(
+           });
+         }
+ 
+-        const client = new VertexAI(optionsWithAuth);
+-
+-        const modelId = `projects/${project}/locations/${location}/publishers/google/models/${name}`;
++        client = new VertexAI(optionsWithAuth);
++        modelId = `projects/${project}/locations/${location}/publishers/google/models/${name}`;
+         const generativeModel = client.getGenerativeModel({
+           model: modelId,
+         });
+ 
+-        const responseModalities = request.config?.responseModalities;
++        // TODO: Figure out why this is being passed as a string.
++        responseModalities =
++          request.config?.responseModalities as unknown as string[];
+ 
+         const req: GenerateContentRequest = {
+           contents: toVertexContent(request.messages),
+@@ -70,6 +75,23 @@ export function vertexAI(
+           tools: toVertexTools(request.tools, request.config),
+           toolConfig: toVertexToolConfig(request.config, request.tools),
+         };
++        if (
++          responseModalities?.includes('AUDIO') &&
++          request.config?.speechConfig
++        ) {
++          req.outputConfig = {
++            // @ts-ignore
++            responseMimeType: 'audio/mpeg',
++            // @ts-ignore
++            speechConfig: request.config?.speechConfig,
++          };
++        }
++        if (
++          responseModalities?.includes('VIDEO') &&
++          request.config?.videoConfig
++        ) {
++          req.videoConfig = request.config.videoConfig;
++        }
+ 
+         const result = await generativeModel.generateContent(req);
+ 
+@@ -82,6 +104,20 @@ export function vertexAI(
+           throw new Error(error);
+         }
+ 
++        track({
++          path: `/googleai/${name}`,
++          type: 'model',
++          request,
++          response: result.response,
++          responseValue: (resp: any) =>
++            resp.candidates?.[0]?.content?.parts.map((p: any) => p.text) || [],
++          context: {
++            modelId,
++            client,
++            responseModalities,
++          },
++        });
++
+         return toGenkitResponse(result.response);
+       },
+     }
